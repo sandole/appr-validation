@@ -75,12 +75,21 @@ The API will be available at:
 ### Run Tests
 
 ```bash
+# Run end-to-end API tests (recommended for validation)
+python -m pytest test_e2e.py -v
+
 # Run single-flight test scenarios
 python test_scenarios.py
 
 # Run multi-flight journey test scenarios
 python test_journey_scenarios.py
+
+# Run all tests
+python test_scenarios.py && python test_journey_scenarios.py && python -m pytest test_e2e.py -v
 ```
+
+**Test Coverage**: 24 E2E tests + 8 single-flight scenarios + 7 journey scenarios = 39 total tests
+See [TEST_COVERAGE.md](TEST_COVERAGE.md) for detailed test coverage report.
 
 ## API Endpoints
 
