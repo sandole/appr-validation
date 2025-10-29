@@ -5,11 +5,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from models import (
-    APPRValidationRequest, 
+    APPRValidationRequest,
     APPRValidationResponse,
-    CompensationResult
+    CompensationResult,
+    JourneyValidationRequest,
+    JourneyValidationResponse
 )
 from appr_validator import APPRValidator
+from journey_validator import JourneyValidator
 from canadian_airports import CANADIAN_AIRPORTS, is_canadian_airport
 
 # Configure logging
@@ -35,8 +38,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize validator
+# Initialize validators
 validator = APPRValidator()
+journey_validator = JourneyValidator()
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -69,9 +73,10 @@ async def get_appr_info():
             "applies_to": "Flights departing from Canada",
             "carrier_classification": "Large Carrier",
             "disruption_types": [
-                "delays", "cancellations", "denied_boarding", 
+                "delays", "cancellations", "denied_boarding",
                 "tarmac_delays", "downgrades", "baggage_issues"
-            ]
+            ],
+            "multi_flight_support": "Yes - handles connecting flights and missed connections"
         },
         "compensation_structure": {
             "large_carrier_rates": {
@@ -80,7 +85,8 @@ async def get_appr_info():
                 "9_plus_hours": "CAD $1000",
                 "denied_boarding_domestic": "CAD $900",
                 "denied_boarding_international": "CAD $1800-$2400"
-            }
+            },
+            "multi_flight_note": "Journey compensation based on total delay to final destination, not sum of individual legs"
         },
         "disruption_categories": {
             "within_carrier_control": "Full compensation required",
@@ -93,25 +99,29 @@ async def get_appr_info():
             "8_hours": "Accommodation and transportation"
         },
         "canadian_airports_count": len(CANADIAN_AIRPORTS),
-        "tarmac_delay_rule": "Mandatory disembarkation after 4 hours"
+        "tarmac_delay_rule": "Mandatory disembarkation after 4 hours",
+        "connection_time_defaults": {
+            "domestic": "45 minutes",
+            "international": "60 minutes"
+        }
     }
 
 @app.post("/validate-appr", response_model=APPRValidationResponse)
 async def validate_appr(request: APPRValidationRequest):
     """
-    Main APPR validation endpoint.
-    
+    Main APPR validation endpoint for single flights.
+
     Validates a flight disruption against APPR regulations and returns
     compensation eligibility, amounts, and passenger rights.
     """
     try:
         request_id = str(uuid.uuid4())
-        
+
         logger.info(f"Processing APPR validation request {request_id} for flight {request.flight_info.flight_number}")
-        
+
         # Validate the request
         is_applicable, reason, compensation_result = validator.validate_appr_request(request)
-        
+
         # Create response
         response = APPRValidationResponse(
             request_id=request_id,
@@ -120,18 +130,58 @@ async def validate_appr(request: APPRValidationRequest):
             compensation_result=compensation_result,
             processing_timestamp=datetime.utcnow()
         )
-        
+
         logger.info(f"APPR validation completed for request {request_id}. Eligible: {compensation_result.eligible_for_compensation}, Amount: CAD ${compensation_result.compensation_amount}")
-        
+
         return response
-        
+
     except ValueError as e:
         logger.error(f"Validation error: {e}")
         raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
-    
+
     except Exception as e:
         logger.error(f"Error processing APPR validation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during validation")
+
+
+@app.post("/validate-journey", response_model=JourneyValidationResponse)
+async def validate_journey(request: JourneyValidationRequest):
+    """
+    Multi-flight journey validation endpoint.
+
+    Validates a multi-leg journey with connecting flights against APPR regulations.
+    Handles complex scenarios including:
+    - Missed connections due to delays or cancellations
+    - Cascading delays across multiple legs
+    - Journey-level compensation (based on delay to final destination)
+    - Rebooking rights for remaining journey segments
+
+    Compensation is calculated based on the total delay to the final destination,
+    not the sum of individual leg delays.
+    """
+    try:
+        logger.info(f"Processing journey validation request for {len(request.flight_legs)}-leg journey")
+
+        # Validate the journey
+        response = journey_validator.validate_journey(request)
+
+        logger.info(
+            f"Journey validation completed for request {response.request_id}. "
+            f"Origin: {response.origin_airport}, Destination: {response.final_destination}, "
+            f"Total legs: {response.total_legs}, Missed connections: {len(response.missed_connections)}, "
+            f"Eligible: {response.journey_compensation_result.eligible_for_compensation}, "
+            f"Amount: CAD ${response.journey_compensation_result.compensation_amount}"
+        )
+
+        return response
+
+    except ValueError as e:
+        logger.error(f"Journey validation error: {e}")
+        raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
+
+    except Exception as e:
+        logger.error(f"Error processing journey validation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error during journey validation")
 
 @app.get("/canadian-airports")
 async def get_canadian_airports():
@@ -166,10 +216,18 @@ async def root():
     """Root endpoint with service information."""
     return {
         "service": "APPR Validation Engine",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "description": "Air Passenger Protection Rights validation for Canadian flight disruptions",
+        "features": [
+            "Single flight validation",
+            "Multi-flight journey validation",
+            "Missed connection detection",
+            "Journey-level compensation calculation",
+            "Comprehensive passenger rights assessment"
+        ],
         "endpoints": {
-            "validate": "/validate-appr",
+            "validate_single_flight": "/validate-appr",
+            "validate_journey": "/validate-journey",
             "health": "/health",
             "info": "/appr-info",
             "airports": "/canadian-airports",
